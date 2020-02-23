@@ -8,6 +8,7 @@ Perhaps for fun: add some statistics about the performance of each group?
 """
 import pandas as pd
 import numpy as np
+from collections import OrderedDict
 # Question: can we actually use google docs regarding privacy and sharing of data?
 # Build our own web-form?
 
@@ -66,7 +67,8 @@ class Question(object):
 class Questionaire(object):
 
     def __init__(self):
-        self.questions = {}
+        self.questions = OrderedDict()
+        self.formdir = '/home/jsn295/ownCloud/Tenerife/testdata.xlsx'
 
     def __repr__(self):
         return f'{self.questions}'
@@ -74,9 +76,33 @@ class Questionaire(object):
     def add_question(self, question: Question):
         self.questions.update({question.id:question})
 
-    def generate_form(self):
-        """ Generates a database with one column per question """
-        pass
+    def generate_form(self,n_respondents):
+        """ Generates a database with one column per question 
+        Does not apply the dtypes yet. Object dtype
+        THe first row is filled with the question text
+        Others (future entries) are filled with NaN
+        """
+        self.form = pd.DataFrame(data = None, columns = self.questions.keys(), index = ['text'] + pd.RangeIndex(1, n_respondents + 1).to_list())
+        self.form.loc['text',:] = [q.text for uid,q in self.questions.items()]
+
+    def upload_form(self):
+        """
+        Places the form in the owncloud
+        """
+        with pd.ExcelWriter(self.formdir, mode = 'w') as writer:
+            self.form.to_excel(writer)
+
+    def download_read_form(self, parse = False):
+        """
+        Reads the form from the cloud, parses data according desired dtypes
+        First row has the column names
+        Does checks on dtypes and NaNs.
+        """
+        self.dtypes = {uid:q.dtype for uid,q in self.questions.items()}
+        if parse:
+            self.form = pd.read_excel(self.formdir, skiprows = [1], index_col = 0, dtype = self.dtypes)
+        else:
+            self.form = pd.read_excel(self.formdir, skiprows = [1], index_col = 0, dtype = {uid:object for uid,q in self.questions.items()})
 
 q1 = Question('how old are you?', np.int16)
 q2 = Question('how much do you earn?', np.uint32)
@@ -87,3 +113,5 @@ q3 = Question('do you have kids', np.bool)
 survey = Questionaire()
 for q in [q1,q2,q21,q211,q3]:
     survey.add_question(q)
+
+survey.generate_form(2)
