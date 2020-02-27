@@ -104,14 +104,74 @@ class Questionaire(object):
         else:
             self.form = pd.read_excel(self.formdir, skiprows = [1], index_col = 0, dtype = {uid:object for uid,q in self.questions.items()})
 
-q1 = Question('how old are you?', np.int16)
-q2 = Question('how much do you earn?', np.uint32)
-q21 = Question('really that much?', np.str, parent_question = q2)
-q211 = Question('wow', np.str, q21)
+class Choice(object):
+
+    def __init__(self, attrweights: list, scenario: int, card: int, version: int):
+        self.attrs = attrweights
+        self.n_attrs = len(attrweights)
+        self.scenario = scenario
+        self.card = card
+        self.version = version
+
+    def __repr__(self):
+        return f'{self.version}.{self.card}.{self.scenario}: {self.attrs}'
+
+class ChoiceExperiment(object):
+    """
+    Class to contain the information of the choice experiment:
+    A set of n_versions of containing n_cards containing n_scenarios with each a choice that is defined by number of weighted attributes
+    """
+    def __init__(self):
+        self.choices = list()
+    
+    def __repr__(self):
+        return f'{self.choices}'
+
+    def infer_design(self, dataframe):
+        gr = dataframe.groupby(['version','card','scenario']) # Produces tuples with (index, 2d_dataframe_slice_
+        for g in gr:
+            self.choices.append(Choice(g[1].values.squeeze().tolist(), *g[0][::-1]))
+
+q1 = 
+q2 = Question
+q21 = 
 q3 = Question('do you have kids', np.bool)
 
 survey = Questionaire()
+survey.add_question(Question('how old are you?', np.int16))
+survey.add_question(Question('how much do you earn?', np.uint32))
+survey.add_question(Question('really that much?', np.str, parent_question = survey))
+survey.add_question(Question('how much do you earn?', np.uint32))
+
 for q in [q1,q2,q21,q211,q3]:
     survey.add_question(q)
 
 survey.generate_form(2)
+
+
+
+data = pd.read_excel('/home/jsn295/ownCloud/Tenerife/data.xlsx') # The version number is Q19. The choice of scenarios at each card is recorded in Q20.1 to Q20.6
+version_column = 'Q19'
+data.rename({version_column:'version'}, axis = 1, inplace = True)
+data.index.name = 'rowid'
+scenario_per_card = data.loc[:,'Q20.1':'Q20.6']
+design = pd.read_excel('/home/jsn295/ownCloud/Tenerife/design.xlsx', index_col = [0,1,2], header = 0)
+
+# Create a version with a one-hot encoding (ncolumns = ncards * nscenarios)
+ncards = 6
+nscenarios = 3
+onehot = pd.DataFrame(data = 0, index = pd.RangeIndex(len(scenario_per_card), name = 'rowid'), columns = pd.MultiIndex.from_product([list(range(1,ncards + 1)), list(range(1,nscenarios + 1))], names = ['card','scenario']))
+for card in np.unique(onehot.columns.get_level_values('card')):
+    cardcol = [c for c in scenario_per_card.columns if c.endswith(str(card))][0]
+    for rowid in scenario_per_card.index.get_level_values('rowid'):
+        scenario_pick = scenario_per_card[cardcol].iloc[rowid]
+        if scenario_pick != nscenarios + 1:
+            onehot.iloc[rowid].loc[(card,scenario_pick)] = 1
+
+# add version numbers and ids to the one-hot encoding, rebuild the index by unstacking, merge with the design weights
+onehot = onehot.stack([0,1])
+onehot.name = 'choice'
+combined = pd.merge(onehot, data, left_index = True, right_index = True)
+combined.set_index('version', append = True, drop = True, inplace = True)
+combined.index = combined.index.droplevel('rowid').reorder_levels(['version','card','scenario'])
+final = design.merge(combined, left_index = True, right_index = True).sort_values(['version','id','card','scenario'])
