@@ -60,7 +60,7 @@ class Question(object):
         """
         self.text = text
         self.dtype = answerdtype
-        self.nodata_options = [np.nan, 9999]
+        self.nodata_options = [9999, 999, -999, -9999, '']
         # Some bookkeeping
         self.nsubquestions = 0 # The current amount of questions that are a subquestion of this question
     
@@ -169,11 +169,30 @@ class Questionaire(object):
             print('did nothing')
 
     def parse_form(self):
-        self.dtypes = {uid:q.dtype for uid,q in self.questions.items()}
-        if parse:
-            self.form = pd.read_excel(self.formdir, skiprows = [1], index_col = 0, dtype = self.dtypes)
-        else:
-            self.form = pd.read_excel(self.formdir, skiprows = [1], index_col = 0, dtype = {uid:object for uid,q in self.questions.items()})
+        """
+        Parsing the form, first with general information on position:
+        zeroth column is the index with unique rows
+        zeroth row contains the question ids (starting 
+        first row can be skipped because it contains the question texts (see generate_form_headers)
+        Then, based on the question ids we start parsing the dtypes
+        """
+        strings = self.download_form() # major dimension = rows
+        strings.pop(1)
+        # If a row has only length 1 then it contains only the generated index. No entries have been filled
+        emptyrows = [item for item in strings if len(item) <= 1]
+        for item in emptyrows:
+            strings.remove(item)
+        
+        # Create the data structure
+        stringarray = np.array(strings, dtype=object)
+        self.data = pd.DataFrame(stringarray[1:,1:], index = pd.Index(stringarray[1:,0], name = stringarray[0,0]), columns = stringarray[0,1:])
+        
+        # Replace the common missing data formats with np.nan
+        accepted_na = {}
+        for q in self.questions.values():
+            accepted_na.update({q.id:{str(item):np.nan for item in q.nodata_options}})
+        self.data.replace(to_replace = accepted_na, inplace = True)
+        
 
 class Choice(object):
 
