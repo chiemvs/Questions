@@ -28,7 +28,8 @@ share/python-wheels/
 MANIFEST
 
 # Credentials
-api_credentials.json
+credentials.json
+*.pickle
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

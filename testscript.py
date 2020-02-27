@@ -8,7 +8,13 @@ Perhaps for fun: add some statistics about the performance of each group?
 """
 import pandas as pd
 import numpy as np
+import pickle
+import os
 from collections import OrderedDict
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+
 # Question: can we actually use google docs regarding privacy and sharing of data?
 # Build our own web-form?
 
@@ -68,7 +74,8 @@ class Questionaire(object):
 
     def __init__(self):
         self.questions = OrderedDict()
-        self.formdir = '/home/jsn295/ownCloud/Tenerife/testdata.xlsx'
+        self.sheetscope = ['https://www.googleapis.com/auth/spreadsheets'] # projecname: choice-experiment
+        self.backupdir = os.path.expanduser('~/ownCloud/Tenerife/backups/')
 
     def __repr__(self):
         return f'{self.questions}'
@@ -76,28 +83,92 @@ class Questionaire(object):
     def add_question(self, question: Question):
         self.questions.update({question.id:question})
 
-    def generate_form(self,n_respondents):
-        """ Generates a database with one column per question 
-        Does not apply the dtypes yet. Object dtype
-        THe first row is filled with the question text
-        Others (future entries) are filled with NaN
+    def generate_form_headers(self, n_respondents):
+        """ 
+        Generates the index column and the column row that defines
+        the sheet where the survey responses will be entered
+        One row per respondent. The generated index column therefore contains unique respondent-id's
+        The generated column rows contain the question ids and question texts
+        The required data model: row of values tuple(), column of values list(tuple)
         """
-        self.form = pd.DataFrame(data = None, columns = self.questions.keys(), index = ['text'] + pd.RangeIndex(1, n_respondents + 1).to_list())
-        self.form.loc['text',:] = [q.text for uid,q in self.questions.items()]
+        self.indexcol = ['id', ''] + list(range(1, n_respondents + 1))
+        self.indexcol = [(s,) for s in self.indexcol]
+        self.columnsrows = [tuple(self.questions.keys()), tuple(q.text for uid,q in self.questions.items())]
+        #self.form = pd.DataFrame(data = None, columns = self.questions.keys(), index = ['text'] + pd.RangeIndex(1, n_respondents + 1).to_list())
+        #self.form.loc['text',:] = [q.text for uid,q in self.questions.items()]
+
+    def establish_sheet_acess(self):    
+        creds = None
+        if os.path.exists('token.pickle'):
+            with open('token.pickle', 'rb') as token:
+                creds = pickle.load(token)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', self.sheetscope)
+                creds = flow.run_local_server(port = 0)
+            with open('token.pickle', 'wb') as token:
+                pickle.dump(creds, token)
+
+        service = build('sheets', 'v4', credentials = creds)
+        self.sheet = service.spreadsheets()
+        
+        # Create the sheet if it is not present (no pickled id is found) Otherwise import the sheetid
+        if os.path.exists('sheetid.pickle'):
+            with open('sheetid.pickle', 'rb') as sheetid:
+                self.sheetid = pickle.load(sheetid)
+        else:
+            data = {'properties':{'title':'choice_experiment_tenerife'}}
+            res = self.sheet.create(body = data).execute()
+            print('created a new sheet')
+            self.sheetid = res['spreadsheetId']
+            with open('sheetid.pickle', 'wb') as sheetid:
+                pickle.dump(self.sheetid, sheetid)
 
     def upload_form(self):
         """
-        Places the form in the owncloud
+        Places the form in the google drive sheet
         """
-        with pd.ExcelWriter(self.formdir, mode = 'w') as writer:
-            self.form.to_excel(writer)
+        # Uploading the index column
+        self.sheet.values().update(spreadsheetId = self.sheetid, range = f'A1:A{len(self.indexcol)}', body = {'values':self.indexcol}, valueInputOption = 'RAW').execute()
+        # Uploading the column rows
+        shape = np.array(survey.columnsrows).shape
+        self.sheet.values().update(spreadsheetId = self.sheetid, range = f'B1:{chr(ord("B") + shape[1])}{shape[0]}', body = {'values':self.columnsrows}, valueInputOption = 'RAW').execute()
 
-    def download_read_form(self, parse = False):
+    def download_form(self):
         """
-        Reads the form from the cloud, parses data according desired dtypes
-        First row has the column names
-        Does checks on dtypes and NaNs.
+        Reads the full form from the cloud, the sheets api delivers 
+        them as strings. list of lists 
         """
+        response = self.sheet.values().get(spreadsheetId = self.sheetid, range = 'Sheet1').execute() 
+        return response['values']
+
+    def backup_form(self):
+        """
+        Backs up the array of raw strings to a pickled object
+        in my cloud
+        """
+        import time
+        strings = self.download_form()
+        with open(self.backupdir + time.strftime('%Y-%m-%d_%H-%M') + '.backup', 'wb') as backup:
+            pickle.dump(strings, backup)
+
+    def restore_form(self, backupname: str):
+        """
+        Restores a backup fully to the sheet overwriting everything that is there
+        """
+        with open(self.backupdir + backupname, 'rb') as backup:
+            stringlist = pickle.load(backup)
+
+        request = self.sheet.values().update(spreadsheetId = self.sheetid, range = 'Sheet1', body = {'values':stringlist}, valueInputOption = 'RAW')
+        are_you_sure = input('are you sure you want to restore (y/n):')
+        if are_you_sure == 'y':
+            request.execute()
+        else:
+            print('did nothing')
+
+    def parse_form(self):
         self.dtypes = {uid:q.dtype for uid,q in self.questions.items()}
         if parse:
             self.form = pd.read_excel(self.formdir, skiprows = [1], index_col = 0, dtype = self.dtypes)
@@ -128,50 +199,56 @@ class ChoiceExperiment(object):
         return f'{self.choices}'
 
     def infer_design(self, dataframe):
+        """
+        This method will be the bridge between the design dataformat supplied by MK
+        and the dataformat used internally
+        """
         gr = dataframe.groupby(['version','card','scenario']) # Produces tuples with (index, 2d_dataframe_slice_
         for g in gr:
             self.choices.append(Choice(g[1].values.squeeze().tolist(), *g[0][::-1]))
 
-q1 = 
-q2 = Question
-q21 = 
-q3 = Question('do you have kids', np.bool)
-
+design = pd.read_excel('~/ownCloud/Tenerife/design.xlsx', index_col = [0,1,2], header = 0)
+exp = ChoiceExperiment()
+exp.infer_design(design)
 survey = Questionaire()
-survey.add_question(Question('how old are you?', np.int16))
-survey.add_question(Question('how much do you earn?', np.uint32))
-survey.add_question(Question('really that much?', np.str, parent_question = survey))
-survey.add_question(Question('how much do you earn?', np.uint32))
+survey.add_question(Question('How old are you?', np.int16))
+survey.add_question(Question('How much do you earn?', np.uint32))
+survey.add_question(Question('Are you happy with that?', np.str, parent_question = survey.questions['2']))
+survey.add_question(Question('Version', np.int16))
 
-for q in [q1,q2,q21,q211,q3]:
-    survey.add_question(q)
+ncards = len(np.unique(design.index.get_level_values('card')))
+nscenarios = len(np.unique(design.index.get_level_values('scenario')))
 
-survey.generate_form(2)
+# Add the choice experiment to the questionaire
+for card in range(1,ncards + 1):
+    survey.add_question(Question(f'Scenario on card {card}', np.int16, parent_question = survey.questions['3'])) 
+
+survey.generate_form_headers(n_respondents = 2)
 
 
+"""
+Transformation of the existing data
+"""
 
-data = pd.read_excel('/home/jsn295/ownCloud/Tenerife/data.xlsx') # The version number is Q19. The choice of scenarios at each card is recorded in Q20.1 to Q20.6
-version_column = 'Q19'
-data.rename({version_column:'version'}, axis = 1, inplace = True)
-data.index.name = 'rowid'
-scenario_per_card = data.loc[:,'Q20.1':'Q20.6']
-design = pd.read_excel('/home/jsn295/ownCloud/Tenerife/design.xlsx', index_col = [0,1,2], header = 0)
-
-# Create a version with a one-hot encoding (ncolumns = ncards * nscenarios)
-ncards = 6
-nscenarios = 3
-onehot = pd.DataFrame(data = 0, index = pd.RangeIndex(len(scenario_per_card), name = 'rowid'), columns = pd.MultiIndex.from_product([list(range(1,ncards + 1)), list(range(1,nscenarios + 1))], names = ['card','scenario']))
-for card in np.unique(onehot.columns.get_level_values('card')):
-    cardcol = [c for c in scenario_per_card.columns if c.endswith(str(card))][0]
-    for rowid in scenario_per_card.index.get_level_values('rowid'):
-        scenario_pick = scenario_per_card[cardcol].iloc[rowid]
-        if scenario_pick != nscenarios + 1:
-            onehot.iloc[rowid].loc[(card,scenario_pick)] = 1
-
-# add version numbers and ids to the one-hot encoding, rebuild the index by unstacking, merge with the design weights
-onehot = onehot.stack([0,1])
-onehot.name = 'choice'
-combined = pd.merge(onehot, data, left_index = True, right_index = True)
-combined.set_index('version', append = True, drop = True, inplace = True)
-combined.index = combined.index.droplevel('rowid').reorder_levels(['version','card','scenario'])
-final = design.merge(combined, left_index = True, right_index = True).sort_values(['version','id','card','scenario'])
+#data = pd.read_excel('~/ownCloud/Tenerife/data.xlsx') # The version number is Q19. The choice of scenarios at each card is recorded in Q20.1 to Q20.6
+#version_column = 'Q19'
+#data.rename({version_column:'version'}, axis = 1, inplace = True)
+#data.index.name = 'rowid'
+#scenario_per_card = data.loc[:,'Q20.1':'Q20.6']
+#
+## Create a version with a one-hot encoding (ncolumns = ncards * nscenarios)
+#onehot = pd.DataFrame(data = 0, index = pd.RangeIndex(len(scenario_per_card), name = 'rowid'), columns = pd.MultiIndex.from_product([list(range(1,ncards + 1)), list(range(1,nscenarios + 1))], names = ['card','scenario']))
+#for card in np.unique(onehot.columns.get_level_values('card')):
+#    cardcol = [c for c in scenario_per_card.columns if c.endswith(str(card))][0]
+#    for rowid in scenario_per_card.index.get_level_values('rowid'):
+#        scenario_pick = scenario_per_card[cardcol].iloc[rowid]
+#        if scenario_pick != nscenarios + 1:
+#            onehot.iloc[rowid].loc[(card,scenario_pick)] = 1
+#
+## add version numbers and ids to the one-hot encoding, rebuild the index by unstacking, merge with the design weights
+#onehot = onehot.stack([0,1])
+#onehot.name = 'choice'
+#combined = pd.merge(onehot, data, left_index = True, right_index = True)
+#combined.set_index('version', append = True, drop = True, inplace = True)
+#combined.index = combined.index.droplevel('rowid').reorder_levels(['version','card','scenario'])
+#final = design.merge(combined, left_index = True, right_index = True).sort_values(['version','id','card','scenario'])
