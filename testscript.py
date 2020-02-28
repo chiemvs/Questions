@@ -20,6 +20,14 @@ from google.auth.transport.requests import Request
 
 # Encoding of the data database is one row per respondent and as many columns as there are questions: plus additional information like name, version number, groupnumber, which area, date or even hour
 
+def convert_to_bool(entry):
+    if entry in ['y','Y','yes','Yes','T','t','TRUE','True','1',1,1.0]:
+        return True
+    elif entry in ['n','N','no','No','F','f','FALSE','False','0',0,0.0]:
+        return False
+    else:
+        return np.nan
+
 def add_unique_id(original_class):
     """
     Decorator that gives an incrementally increasing unique self.id to class c each time it is initiated
@@ -60,7 +68,7 @@ class Question(object):
         """
         self.text = text
         self.dtype = answerdtype
-        self.nodata_options = [9999, 999, -999, -9999, '']
+        self.nodata_options = [9999, 999, -999, -9999, '', 'NA','na', 'none','None']
         # Some bookkeeping
         self.nsubquestions = 0 # The current amount of questions that are a subquestion of this question
     
@@ -97,7 +105,7 @@ class Questionaire(object):
         #self.form = pd.DataFrame(data = None, columns = self.questions.keys(), index = ['text'] + pd.RangeIndex(1, n_respondents + 1).to_list())
         #self.form.loc['text',:] = [q.text for uid,q in self.questions.items()]
 
-    def establish_sheet_acess(self):    
+    def establish_sheet_access(self):    
         creds = None
         if os.path.exists('token.pickle'):
             with open('token.pickle', 'rb') as token:
@@ -193,6 +201,30 @@ class Questionaire(object):
             accepted_na.update({q.id:{str(item):np.nan for item in q.nodata_options}})
         self.data.replace(to_replace = accepted_na, inplace = True)
         
+        # remove potential newline characters
+        self.data.replace(to_replace = "\n", value = '', regex = True, inplace = True)
+        
+        self.data.index = self.data.index.astype('int')# Cast the index to integer
+        # Cast the columns to the desired dtypes. If it does not succeed raise a warning
+        # Data is already in string format so string conversion should always be succesful
+        for column in self.data.columns:
+            dtype = self.questions[column].dtype
+            try:
+                self.data[column] = self.data[column].astype(dtype)
+                print(f'soft conversion of {column} to {dtype}')
+            except TypeError:
+                if 'int' in str(dtype).lower(): 
+                    self.data[column] = pd.to_numeric(self.data[column], errors = 'coerce').round().astype(dtype)
+                    print(f'hard coerced conversion of {column} to {dtype} via rounded numeric')
+                elif 'float' in str(dtype).lower():
+                    self.data[column] = pd.to_numeric(self.data[column], errors = 'coerce').astype(dtype)
+                    print(f'hard coerced conversion of {column} to {dtype} via numeric')
+                elif 'bool' in str(dtype).lower():
+                    self.data[column] = self.data[column].apply(convert_to_bool).astype(dtype)
+                    print(f'custom functional conversion of {column} to {dtype}')
+                else:
+                    print(f'no conversion possible for {column}')
+        
 
 class Choice(object):
 
@@ -211,39 +243,79 @@ class ChoiceExperiment(object):
     Class to contain the information of the choice experiment:
     A set of n_versions of containing n_cards containing n_scenarios with each a choice that is defined by number of weighted attributes
     """
-    def __init__(self):
+    def __init__(self, design):
         self.choices = list()
+        self.design = design
+        self.nversions = len(np.unique(design.index.get_level_values('version')))
+        self.ncards = len(np.unique(design.index.get_level_values('card')))
+        self.nscenarios = len(np.unique(design.index.get_level_values('scenario')))
     
     def __repr__(self):
         return f'{self.choices}'
 
-    def infer_design(self, dataframe):
+    def design_to_choices(self):
         """
         This method will be the bridge between the design dataformat supplied by MK
-        and the dataformat used internally
         """
-        gr = dataframe.groupby(['version','card','scenario']) # Produces tuples with (index, 2d_dataframe_slice_
+        gr = self.design.groupby(['version','card','scenario']) # Produces tuples with (index, 2d_dataframe_slice_
         for g in gr:
             self.choices.append(Choice(g[1].values.squeeze().tolist(), *g[0][::-1]))
+    
+    def encode_dataset(self, questionaire: Questionaire):
+        """
+        Expands the supplied data with a one-hot encoding of 
+        chosen scenarios. (new column with choice)
+        Assumes that the data has a unique integer respondent id index
+        It also searches for the column with the version number
+        Based on that id it appends the attribute weights from the design
+        """
+        version_column = [q.id for q in questionaire.questions.values() if q.text.lower().startswith('version')][0] # version column determined by text. Scenario picks should be subquestions of it, are found by id. 
+        print(f'found version in column {version_column} of data')
+        data = questionaire.data
+        assert data.index.name == 'id'
+        onehot = pd.DataFrame(data = 0, index = data.index, columns = pd.MultiIndex.from_product([list(range(1,self.ncards + 1)), list(range(1,self.nscenarios + 1))], names = ['card','scenario']), dtype = object) 
+        for card in range(1,self.ncards + 1): 
+            cardcol = [c for c in data.columns if c == '.'.join([version_column,str(card)])] # assumes that the fifth card column is e.g. '5.5' if the version column was 5
+            for respid in onehot.index:
+                scenario_pick = data.loc[respid,cardcol] # Still a dataframe
+                if scenario_pick.isnull().all():
+                    onehot.loc[respid,(card,slice(None))] = pd.NA
+                elif scenario_pick[0] != self.nscenarios + 1:
+                    onehot.loc[respid,(card,scenario_pick[0])] = 1
+        onehot = onehot.stack([0,1], dropna = False).astype(pd.Int32Dtype()) # Becomes a series, onehot cannot be stacked if it already has the dtype IntXX
+        onehot.name = 'choice'
+        self.encoded = pd.merge(onehot, data, left_index = True, right_index = True)
+        # Fix the index (to be merged with attributes) by
+        # adding version to the levels and resetting the id
+        # We will drop entries without a version number (useless for the experiment)
+        self.encoded.dropna(how = 'any', axis = 0, subset = [version_column], inplace = True)
+        self.encoded['version'] = self.encoded[version_column] # make a new version index
+        self.encoded.set_index('version', append = True, drop = True, inplace = True)
+        self.encoded.reset_index('id', inplace = True)
+        self.encoded.index = self.encoded.index.reorder_levels(['version','card','scenario'])
+        
+        # Do the final combination with the designed attributes based on version number
+        self.final = pd.merge(self.encoded, self.design, how = 'left', left_index = True, right_index = True)
 
 design = pd.read_excel('~/ownCloud/Tenerife/design.xlsx', index_col = [0,1,2], header = 0)
-exp = ChoiceExperiment()
-exp.infer_design(design)
+exp = ChoiceExperiment(design = design)
 survey = Questionaire()
-survey.add_question(Question('How old are you?', np.int16))
-survey.add_question(Question('How much do you earn?', np.uint32))
-survey.add_question(Question('Are you happy with that?', np.str, parent_question = survey.questions['2']))
-survey.add_question(Question('Version', np.int16))
+survey.add_question(Question('Time', np.datetime64))
+survey.add_question(Question('How old are you?', pd.Int32Dtype()))
+survey.add_question(Question('How much do you earn?', pd.Int32Dtype()))
+survey.add_question(Question('Are you happy with that?', pd.BooleanDtype(), parent_question = survey.questions['3']))
+survey.add_question(Question('What is your name?', pd.StringDtype()))
+survey.add_question(Question('Version', pd.Int16Dtype()))
 
-ncards = len(np.unique(design.index.get_level_values('card')))
-nscenarios = len(np.unique(design.index.get_level_values('scenario')))
 
 # Add the choice experiment to the questionaire
-for card in range(1,ncards + 1):
-    survey.add_question(Question(f'Scenario on card {card}', np.int16, parent_question = survey.questions['3'])) 
+for card in range(1,exp.ncards + 1):
+    survey.add_question(Question(f'Scenario on card {card}', pd.Int32Dtype(), parent_question = survey.questions['5'])) 
 
-survey.generate_form_headers(n_respondents = 2)
-
+survey.generate_form_headers(n_respondents = 100)
+survey.establish_sheet_access()
+#survey.parse_form()
+#exp.encode_dataset(survey)
 
 """
 Transformation of the existing data
