@@ -300,17 +300,17 @@ class ChoiceExperiment(object):
 design = pd.read_excel('~/ownCloud/Tenerife/design.xlsx', index_col = [0,1,2], header = 0)
 exp = ChoiceExperiment(design = design)
 survey = Questionaire()
-survey.add_question(Question('Time', np.datetime64))
-survey.add_question(Question('How old are you?', pd.Int32Dtype()))
-survey.add_question(Question('How much do you earn?', pd.Int32Dtype()))
-survey.add_question(Question('Are you happy with that?', pd.BooleanDtype(), parent_question = survey.questions['3']))
-survey.add_question(Question('What is your name?', pd.StringDtype()))
+survey.add_question(Question('Date', np.datetime64))
+survey.add_question(Question('Location [1-4]', pd.Int16Dtype()))
+survey.add_question(Question('Group number [1-9]', pd.Int16Dtype()))
+survey.add_question(Question('How old are you? [years]', pd.Int32Dtype()))
+survey.add_question(Question('How long do you stay for? [days]', pd.Int32Dtype()))
+survey.add_question(Question('At what type of accomodation?', pd.StringDtype(), parent_question = survey.questions['5']))
 survey.add_question(Question('Version', pd.Int16Dtype()))
-
 
 # Add the choice experiment to the questionaire
 for card in range(1,exp.ncards + 1):
-    survey.add_question(Question(f'Scenario on card {card}', pd.Int32Dtype(), parent_question = survey.questions['5'])) 
+    survey.add_question(Question(f'Scenario on card {card}', pd.Int32Dtype(), parent_question = survey.questions['6'])) 
 
 survey.generate_form_headers(n_respondents = 100)
 survey.establish_sheet_access()
