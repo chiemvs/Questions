@@ -61,7 +61,7 @@ class Question(object):
     """
     Want these to have auto-incrementing question id's and have the possibility to be a subquestion of..
     """
-    def __init__(self, text: str = None, answerdtype: np.dtype = None, parent_question = None):
+    def __init__(self, text: str = None, answerdtype: type = None, parent_question = None):
         """
         Requires the question text, the desired datatype of the answers
         If the question is going to be a subquestion then supply the parent
@@ -75,8 +75,20 @@ class Question(object):
     def __repr__(self):
         return f'Question {self.id}: {self.text}'
 
-    def check_answer(answer):
-       pass # check if the answer has the correct dtype or that it has one of the accepted no_data encodings. In that case the answer should be set to None 
+
+class CustomField(object):
+    """
+    Just custom fields that are produced in the questionare but that do need auto incrementing ids
+    it only needs a unique name
+    """
+    def __init__(self, name, answerdtype: type = None):
+        self.name = name
+        self.text = name
+        self.dtype = answerdtype
+        self.nodata_options = [9999, 999, -999, -9999, '', 'NA','na', 'none','None']
+
+    def __repr__(self):
+        return f'Field {self.name}'
 
 class Questionaire(object):
 
@@ -225,6 +237,79 @@ class Questionaire(object):
                 else:
                     print(f'no conversion possible for {column}')
         
+class Kobo(object):
+
+    def __init__(self):
+        self.questions = OrderedDict()
+        self.backupdir = os.path.expanduser('~/ownCloud/Tenerife/backups/')
+
+    def __repr__(self):
+        return f'{self.questions}'
+
+    def add_question(self, question: Question):
+        self.questions.update({question.id:question})
+
+    def add_custom_field(self, field: CustomField):
+        self.questions.update({field.name:field})
+
+    def read_form(self, path):
+        """
+        Reads the full form stored on disk as xlsx
+        """
+        self.response = pd.read_excel(path, header = 0, dtype = object)
+
+    def parse_form(self):
+        """
+        Parsing the form, headers are in zeroth row. Format with qid: _1_location or just text 
+        The index of the respondent id's is _index
+        Then, based on the question ids we start parsing the dtypes
+        """
+        self.response.set_index('_index', inplace = True)
+        self.response.index.name = 'id'
+        self.response.index = self.response.index.astype('int')# Cast the index to integer
+
+        # Replace the present questions with id's by their id.
+        def renamer(colname):
+            parts = np.array(colname[:8].split('_'))
+            parts[[s.isdigit() for s in parts]]
+            parts = parts[[s.isdigit() for s in parts]].tolist()
+            if parts:
+                return '.'.join(parts)
+            else:
+                return colname
+        self.response.rename(columns = renamer, inplace = True)
+        # Replace the common missing data formats with np.nan
+        accepted_na = self.questions['1'].nodata_options
+        self.response.replace(to_replace = accepted_na, value = np.nan, inplace = True)
+        
+        # remove potential newline characters and remove columns not in the questionaire
+        self.data = self.response.replace(to_replace = "\n", value = '', regex = True).drop([c for c in self.response.columns if not c in self.questions], axis = 1)
+        
+        # Cast the columns to the desired dtypes. If it does not succeed raise a warning
+        # Data is already in string format so string conversion should always be succesful
+        for column in self.data.columns:
+            dtype = self.questions[column].dtype
+            try:
+                self.data[column] = self.data[column].astype(dtype)
+                print(f'soft conversion of {column} to {dtype}')
+            except TypeError:
+                if 'int' in str(dtype).lower(): 
+                    try:
+                        self.data[column] = self.data[column].apply(lambda x: ord(x.lower()) - 96 if ((not pd.isnull(x)) and (not x.isdigit())) else x) # Conversion of 'a', 'b', 'c' to 1,2,3. Will fail if integer as float strings are found. E.g. '6.0'. This is fed into ord
+                        print(f'hard conversion of {column} to {dtype} via rounded numeric, potentially via abc')
+                    except:
+                        print(f'hard coerced conversion of {column} to {dtype} via rounded numeric')
+                        pass 
+                    self.data[column] = pd.to_numeric(self.data[column], errors = 'coerce').round().astype(dtype)
+                elif 'float' in str(dtype).lower():
+                    self.data[column] = pd.to_numeric(self.data[column], errors = 'coerce').astype(dtype)
+                    print(f'hard coerced conversion of {column} to {dtype} via numeric')
+                elif 'bool' in str(dtype).lower():
+                    self.data[column] = self.data[column].apply(convert_to_bool).astype(dtype)
+                    print(f'custom functional conversion of {column} to {dtype}')
+                else:
+                    print(f'no conversion possible for {column}')
+        
 
 class Choice(object):
 
@@ -279,7 +364,9 @@ class ChoiceExperiment(object):
             for respid in onehot.index:
                 scenario_pick = data.loc[respid,cardcol] # Still a dataframe
                 if scenario_pick.isnull().all():
-                    onehot.loc[respid,(card,slice(None))] = pd.NA
+                    # Currently we use None / np.nan to designate the no-pick scenario. So no-data becomes no-choice
+                    #onehot.loc[respid,(card,slice(None))] = pd.NA 
+                    pass
                 elif scenario_pick[0] != self.nscenarios + 1:
                     onehot.loc[respid,(card,scenario_pick[0])] = 1
         onehot = onehot.stack([0,1], dropna = False).astype(pd.Int32Dtype()) # Becomes a series, onehot cannot be stacked if it already has the dtype IntXX
@@ -299,21 +386,57 @@ class ChoiceExperiment(object):
 
 design = pd.read_excel('~/ownCloud/Tenerife/design.xlsx', index_col = [0,1,2], header = 0)
 exp = ChoiceExperiment(design = design)
-survey = Questionaire()
-survey.add_question(Question('Date', np.datetime64))
-survey.add_question(Question('Location [1-4]', pd.Int16Dtype()))
-survey.add_question(Question('Group number [1-9]', pd.Int16Dtype()))
-survey.add_question(Question('How old are you? [years]', pd.Int32Dtype()))
-survey.add_question(Question('How long do you stay for? [days]', pd.Int32Dtype()))
-survey.add_question(Question('At what type of accomodation?', pd.StringDtype(), parent_question = survey.questions['5']))
-survey.add_question(Question('Version', pd.Int16Dtype()))
-
+survey = Kobo()
+survey.add_custom_field(CustomField('start',np.datetime64))
+survey.add_custom_field(CustomField('end',np.datetime64))
+survey.add_custom_field(CustomField('today',np.datetime64))
+survey.add_custom_field(CustomField('Name_interviewer',pd.StringDtype()))
+survey.add_custom_field(CustomField('Group',pd.Int16Dtype()))
+survey.add_custom_field(CustomField('Location',pd.StringDtype()))
+survey.add_custom_field(CustomField('Date',np.datetime64))
+survey.add_question(Question('Gender', pd.StringDtype()))
+survey.add_question(Question('Origin', pd.StringDtype()))
+survey.add_question(Question('Origin specification', pd.StringDtype(), parent_question = survey.questions['2']))
+survey.add_question(Question('Number of visits', pd.Int32Dtype()))
+survey.add_question(Question('Number of days', pd.Int32Dtype()))
+survey.add_question(Question('Purpose visit', pd.StringDtype()))
+survey.add_question(Question('Number of people', pd.Int32Dtype()))
+survey.add_question(Question('Arrival', pd.StringDtype()))
+survey.add_question(Question('Village of stay', pd.StringDtype()))
+survey.add_question(Question('Transport type', pd.StringDtype()))
+survey.add_question(Question('Transport type specification', pd.StringDtype(), parent_question = survey.questions['9']))
+survey.add_question(Question('Transport usage', np.float64))
+survey.add_question(Question('Preferred route', pd.StringDtype()))
+survey.add_question(Question('Erosion informedness', pd.Int32Dtype()))
+survey.add_question(Question('Conversion', pd.StringDtype()))
+survey.add_question(Question('Conversion specification', pd.StringDtype(), parent_question = survey.questions['13']))
+survey.add_question(Question('Restoration', pd.BooleanDtype()))
+survey.add_question(Question('Version', pd.Int32Dtype()))
 # Add the choice experiment to the questionaire
 for card in range(1,exp.ncards + 1):
-    survey.add_question(Question(f'Scenario on card {card}', pd.Int32Dtype(), parent_question = survey.questions['6'])) 
+    survey.add_question(Question(f'Scenario on card {card}', pd.Int32Dtype(), parent_question = survey.questions['15'])) 
+survey.add_question(Question('Important aspect', pd.StringDtype()))
+survey.add_question(Question('Electricity', pd.BooleanDtype()))
+survey.add_question(Question('Vineyard visit', pd.BooleanDtype()))
+survey.add_question(Question('Vineyard importance', pd.StringDtype()))
+survey.add_question(Question('Ecosystem services', pd.BooleanDtype()))
+survey.add_question(Question('Entrance fee', pd.StringDtype()))
+survey.add_question(Question('Higher entrance fee', pd.StringDtype()))
+survey.add_question(Question('Species richness', pd.StringDtype()))
+survey.add_question(Question('Highest', pd.StringDtype(), parent_question = survey.questions['23']))
+survey.add_question(Question('Middle', pd.StringDtype(), parent_question = survey.questions['23']))
+survey.add_question(Question('Lowest', pd.StringDtype(), parent_question = survey.questions['23']))
 
-survey.generate_form_headers(n_respondents = 100)
-survey.establish_sheet_access()
+survey.add_question(Question('Age', pd.StringDtype()))
+survey.add_question(Question('Education', pd.StringDtype()))
+survey.add_question(Question('Education specification', pd.StringDtype(), parent_question = survey.questions['18']))
+survey.add_question(Question('Income', pd.StringDtype()))
+survey.add_question(Question('Share', pd.StringDtype()))
+
+survey.read_form('~/ownCloud/Tenerife/backups/Tenerife_fieldwork_new.xlsx')
+
+#survey.generate_form_headers(n_respondents = 100)
+#survey.establish_sheet_access()
 #survey.parse_form()
 #exp.encode_dataset(survey)
 
