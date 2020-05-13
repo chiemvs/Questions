@@ -384,7 +384,7 @@ class ChoiceExperiment(object):
         # Do the final combination with the designed attributes based on version number
         self.final = pd.merge(self.encoded, self.design, how = 'left', left_index = True, right_index = True)
 
-design = pd.read_excel('~/ownCloud/Tenerife/design.xlsx', index_col = [0,1,2], header = 0)
+design = pd.read_excel('~/ownCloud/Tenerife/design_adapted.xlsx', index_col = [0,1,2], header = 0)
 exp = ChoiceExperiment(design = design)
 survey = Kobo()
 survey.add_custom_field(CustomField('start',np.datetime64))
@@ -427,7 +427,7 @@ survey.add_question(Question('Education specification', pd.StringDtype(), parent
 survey.add_question(Question('Income', pd.StringDtype()))
 survey.add_question(Question('Share', pd.StringDtype()))
 
-survey.read_form('~/ownCloud/Tenerife/backups/Tenerife_fieldwork_2020-03-10-15-08-50.xlsx')
+survey.read_form('~/ownCloud/Tenerife/backups/Tenerife_fieldwork_2020-03-18-09-12-47.xlsx')
 
 #survey.generate_form_headers(n_respondents = 100)
 #survey.establish_sheet_access()
